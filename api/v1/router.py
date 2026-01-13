@@ -45,7 +45,7 @@ def build_orchestrator_payload(
     return payload
 
 
-@orchestrator_router.post("/data-privacy/call", summary="Query the agent orchestrator")
+@orchestrator_router.post("/global-chat", summary="Query the agent orchestrator")
 async def call_orchestrator(request: OrchestratorRequest):
     logger.info(f"Starting the agent call as query received as {request.query}")
     if not request.query.strip():
@@ -149,46 +149,3 @@ async def list_available_agents():
         logger.error("Agent list API failed", exc_info=True)
         raise HTTPException(exc.response.status_code, exc.response.text)
 
-@direct_agent_router.post("/agent_call", summary= "Call one or more agents directly in parallel")
-async def direct_agent_call(request: Request,  body: DirectCallRequest):
-    """Bypasses the orchestrator and sends a query directly to one or more 
-    specified agents in parallel. Returns an aggregated result."""
-
-    agent_registry  = request.app.state.agent_registry
-    tasks = []
-    async with httpx.AsyncClient() as client:
-        for agent_name in body.target_agents:
-            agent_url = agent_registry.get(agent_name)
-            if not agent_url:
-                logger.warning(f"Agent '{agent_name}' not found in registry, skipping")
-                continue
-
-            payload = build_orchestrator_payload(body.query)
-            task = client.post(agent_url, json=payload, timeout=180.0)
-            tasks.append(task)
-
-        if not tasks:
-            raise HTTPException(
-                status_code= 404,
-                detail= f"None of the specified agents were found. Available agents are: {list(agent_registry.keys())}"
-            )
-        
-        responses = await asyncio.gather(*tasks, return_exceptions= True)
-    
-    aggregated_results = {}
-    for agent_name, response in zip(body.target_agents, responses):
-        if isinstance(response, Exception):
-            aggregated_results[agent_name] = {"error": f"Failed to get response: {str(response)}"}
-        else:
-            try: 
-                response.raise_for_status()
-                full_agent_response = response.json()
-                agent_text = full_agent_response['result']['history'][-1]['parts'][0]['text']
-                aggregated_results[agent_name] = {"answer": agent_text or "Agent returned an empty response."}
-
-            except Exception as e:
-                # If parsing fails or status is bad, record that error
-                aggregated_results[agent_name] = {"error": f"Could not parse response: {str(e)}"}
-
-    # Return the final dictionary containing all results
-    return aggregated_results

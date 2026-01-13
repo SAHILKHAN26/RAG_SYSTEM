@@ -10,24 +10,11 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-REDIS_URL = os.getenv("REDIS_URL")
-
-
 ORCHESTRATOR_HOST = os.getenv("ORCHESTRATOR_HOST")
 ORCHESTRATOR_PORT = os.getenv("ORCHESTRATOR_PORT")
 
-DP_ORCHESTRATOR_HOST = os.getenv("DP_ORCHESTRATOR_HOST")
-DP_ORCHESTRATOR_PORT = os.getenv("DP_ORCHESTRATOR_PORT")
-
-
-
 HOST_REGISTRY_FILE = "src/utils/agent_registry_host.json"
-DP_ORCHESTRATOR_REGISTRY_FILE = "src/utils/agent_registry_dp_orchestrator.json"
 
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_USERNAME = os.getenv("NEO4J_USERNAME")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
-NEO4J_DATABASE = os.getenv("NEO4J_DATABASE")
 
 # Database Configuration
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./bot_gpt.db")
