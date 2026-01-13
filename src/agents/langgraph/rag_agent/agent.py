@@ -8,7 +8,7 @@ This module implements a LangGraph workflow with:
 - History management: Loads and saves conversation history
 """
 
-from typing import TypedDict, List, Optional, Annotated
+from typing import TypedDict, List, Optional, Annotated, Any
 from operator import add
 
 from langgraph.graph import StateGraph, END
@@ -46,6 +46,10 @@ class RAGState(TypedDict):
 
 class RAGAgent:
     """LangGraph-based RAG agent for conversational AI"""
+    
+    # Heuristic threshold for L2 distance (adjust based on embedding model)
+    # Lower is better. If best match is > threshold, we assume it's irrelevant.
+    RELEVANCE_THRESHOLD = 1.2
     
     def __init__(
         self,
@@ -111,14 +115,7 @@ class RAGAgent:
         Returns:
             Updated state
         """
-        logger.info(f"Router node: mode={state['mode']}")
-        
-        # If mode is RAG and we have documents, we need retrieval
-        if state["mode"] == ConversationMode.RAG.value and state.get("document_ids"):
-            logger.info("Routing to retrieval")
-        else:
-            logger.info("Routing to direct generation")
-        
+        logger.info(f"Router node: mode={state.get('mode')}")
         return state
     
     def _should_retrieve(self, state: RAGState) -> str:
@@ -131,9 +128,21 @@ class RAGAgent:
         Returns:
             Next node name
         """
-        if state["mode"] == ConversationMode.RAG.value and state.get("document_ids"):
+        mode = state.get("mode")
+        doc_ids = state.get("document_ids")
+        
+        # Case 1: Explicit RAG Mode -> Always retrieve
+        if mode == ConversationMode.RAG.value:
             return "retrieve"
-        return "generate"
+            
+        # Case 2: Explicitly provided documents -> Always retrieve
+        if doc_ids and len(doc_ids) > 0:
+            return "retrieve"
+            
+        # Case 3: Orchestrator / Open Chat with NO docs -> "Auto RAG"
+        # We route to retrieval to search ALL chunks. 
+        # The retrieval node will decide if results are relevant enough to keep.
+        return "retrieve"
     
     async def _retrieval_node(self, state: RAGState) -> RAGState:
         """
@@ -145,32 +154,45 @@ class RAGAgent:
         Returns:
             Updated state with retrieved context
         """
-        logger.info("Retrieval node: fetching relevant chunks")
+        logger.info("Retrieval node: searching for relevant chunks")
         
         try:
             query = state["user_message"]
             document_ids = state.get("document_ids", [])
             
-            # Search for relevant chunks across all documents in a single search
+            top_results = []
+            
             if document_ids:
-                # Pass list of document IDs to filter - vector store will search all at once
+                # Explicit filtering if document IDs are provided
                 top_results = self.vector_store.search(
                     query=query,
-                    top_k=3,  # Get top 3 chunks across all documents
-                    filter_dict={"document_id": document_ids}  # List of document IDs
+                    top_k=3,
+                    filter_dict={"document_id": document_ids}
                 )
-                logger.info(f"Retrieved top 3 chunks from {len(document_ids)} documents in single search")
+                logger.info(f"Retrieved top 3 chunks from {len(document_ids)} documents")
             else:
-                # No specific documents, search all
+                # Auto RAG: Search EVERYTHING
                 top_results = self.vector_store.search(query=query, top_k=3)
-                logger.info("Retrieved top 3 chunks from all documents")
+                
+                # # Check relevance for Auto RAG
+                # if top_results:
+                #     best_distance = top_results[0][2]  # L2 distance
+                #     logger.info(f"Auto RAG: Best match distance = {best_distance}")
+                    
+                #     # If best match is too far, discard results (fallback to open chat)
+                #     # Note: L2 distance is unbounded, roughly 0.0 (exact) to 2.0+ (far) for normalized vectors
+                #     # Adjust RELEVANCE_THRESHOLD as needed.
+                #     if best_distance > self.RELEVANCE_THRESHOLD:
+                #         logger.info(f"Auto RAG: Results irrelevant (>{self.RELEVANCE_THRESHOLD}). Switching to Open Chat.")
+                #         top_results = []
+                # else:
+                #     logger.info("Auto RAG: No results found.")
             
             # Extract text from results
             retrieved_texts = [result[0] for result in top_results]
             
             state["retrieved_context"] = retrieved_texts
-            logger.info(f"Retrieved {len(retrieved_texts)} chunks with best relevance scores")
-        
+            
         except Exception as e:
             logger.error(f"Error in retrieval node: {e}", exc_info=True)
             state["retrieved_context"] = []
@@ -211,6 +233,10 @@ Instructions:
 - If the context doesn't contain enough information, say so
 - Be specific and cite relevant parts of the context
 """
+                messages.append({"role": "system", "content": system_prompt})
+            else:
+                # No context (Open Chat fallback)
+                system_prompt = "You are a helpful AI assistant. Answer the user's question to the best of your ability."
                 messages.append({"role": "system", "content": system_prompt})
             
             # Add chat history
@@ -255,41 +281,72 @@ Instructions:
     
     async def process_message(
         self,
+        user_message: str,  # Simplified interface for TaskManager
+        session: Optional[AsyncSession] = None,
+        conversation_id: Optional[str] = None,
+        mode: str = ConversationMode.OPEN_CHAT.value,
+        document_ids: Optional[List[str]] = None,
+    ) -> Any:  # Returns dict for TaskManager or tuple for internal use
+        """
+        Process a user message and generate a response.
+        Compatible with both TaskManager (Orchestrator) and direct API use.
+        """
+        
+        # If called from TaskManager (Orchestrator), create a temporary session/id
+        is_orchestrator_call = session is None
+        
+        if is_orchestrator_call:
+            # Create a temporary session just for this request
+            from src.core.database import db_manager
+            import uuid
+            
+            # Use ephemeral conversation ID
+            conversation_id = f"temp-{uuid.uuid4()}"
+            mode = ConversationMode.OPEN_CHAT.value # Default to open/auto for orchestrator
+            
+            # Create a temporary session context
+            async with db_manager.async_session_maker() as temp_session:
+                response_text, _ = await self._process_internal(
+                    temp_session, conversation_id, user_message, mode, document_ids
+                )
+                
+                # Format for TaskManager
+                return {
+                    "agent_message": response_text,
+                    "agent_name": "RAGAgent"
+                }
+        else:
+            # Internal call with existing session validation
+            return await self._process_internal(
+                session, conversation_id, user_message, mode, document_ids
+            )
+
+    async def _process_internal(
+        self,
         session: AsyncSession,
         conversation_id: str,
         user_message: str,
-        mode: str = ConversationMode.OPEN_CHAT.value,
-        document_ids: Optional[List[str]] = None,
+        mode: str,
+        document_ids: Optional[List[str]],
     ) -> tuple[str, int]:
-        """
-        Process a user message and generate a response.
-        
-        Args:
-            session: Database session
-            conversation_id: ID of the conversation
-            user_message: User's message
-            mode: Conversation mode ('open_chat' or 'rag')
-            document_ids: Optional list of document IDs for RAG
-            
-        Returns:
-            Tuple of (response, token_count)
-        """
+        """Internal processing logic"""
         logger.info(f"Processing message for conversation {conversation_id}")
         
         try:
             # Load conversation history
+            # Note: For orchestrator/temp calls, this might be empty, which is fine
             messages, _ = await self.conversation_manager.prepare_context(
                 session=session,
                 conversation_id=conversation_id,
                 new_message=user_message,
-                retrieved_context=None,  # Will be filled by retrieval node
+                retrieved_context=None,
             )
             
             # Initialize state
             initial_state: RAGState = {
                 "conversation_id": conversation_id,
                 "user_message": user_message,
-                "chat_history": messages[:-1],  # Exclude the new message
+                "chat_history": messages[:-1],
                 "retrieved_context": None,
                 "generated_response": "",
                 "mode": mode,
@@ -305,6 +362,7 @@ Instructions:
             final_state = await compiled_graph.ainvoke(initial_state)
             
             response = final_state["generated_response"]
+            logger.info(f"Final response from RAG Agent: {response}")
             token_count = final_state["total_tokens"]
             
             if final_state.get("error"):
@@ -314,7 +372,7 @@ Instructions:
         
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
-            return "I apologize, but I encountered an error processing your message. Please try again.", 0
+            return "I apologize, but I encountered an error processing your message.", 0
 
 
 # Global RAG agent instance

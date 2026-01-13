@@ -23,6 +23,7 @@ from google.genai import types
 # -----------------------------------------------------------------------------
 # A2A server-side infrastructure
 # -----------------------------------------------------------------------------
+from src.core.constant import DEFAULT_LLM_MODEL
 from src.server.task_manager import InMemoryTaskManager
 # InMemoryTaskManager: base class providing in-memory task storage and locking
 from models.request import SendTaskRequest, SendTaskResponse
@@ -40,6 +41,7 @@ from dotenv import load_dotenv
 import json
 # Load environment variables (e.g., API keys) from a .env file
 load_dotenv()
+from src.core.logger import app_logger as logger
 
 
 class OrchestratorAgent:
@@ -101,7 +103,7 @@ class OrchestratorAgent:
         - Available tool functions
         """
         return LlmAgent(
-            model="gemini-2.5-pro",    # Specify Gemini model version
+            model="gemini-2.5-flash",    # Specify Gemini model version
             name="orchestrator_agent",          # Human identifier for this agent
             description="Delegates user queries to child A2A agents based on intent.",
             instruction=self._root_instruction,  # Function providing system prompt text
@@ -124,9 +126,18 @@ class OrchestratorAgent:
             "2) delegate_task(agent_name, message) -> call that agent\n\n"
             
             f"Available agents:\n{agent_list}\n\n"
-            "Use DPOrchestratorAgent when the passed query seems like a article or news and it contains the incident information related to any data breach related to any company"
-            "Use GraphRagOrchestratorAgent when the query is related to asking any incident details or and company related details"
-            "Use SuggestionAgent when the user wants to get some suggestion about any company or any incident"        
+            "ROUTING INSTRUCTIONS:\n"
+            "- Use 'GeneralAgent' for:\n"
+            "  * Open domain chat (e.g., 'Hi', 'How are you?')\n"
+            "  * General knowledge questions\n"
+            "  * Coding help or creative writing\n"
+            "  * Any query NOT requiring specific document context\n"
+            "\n"
+            "- Use 'RAGAgent' for:\n"
+            "  * Questions about specific documents or files\n"
+            "  * Information retrieval from the knowledge base\n"
+            "  * Summarizing uploaded content\n"
+            "\n"
             "If you decide some agent and the agent is not in the agent list or got some error then just return some apology message"  )
         
 
@@ -193,7 +204,7 @@ class OrchestratorAgent:
             return child_task.history[-1].parts[0].text
         return ""
 
-    async def invoke(self, query: str, session_id: str) -> dict:
+    async def invoke(self, query: str, session_id: str,metadata:dict) -> dict:
         """
         Main entry: receives a user query + session_id,
         sets up or retrieves a session, wraps the query for the LLM,
@@ -212,7 +223,7 @@ class OrchestratorAgent:
                 app_name=self._agent.name,
                 user_id=self._user_id,
                 session_id=session_id,
-                state={}
+                state={"metadata":metadata}  # Store metadata in session state
             )
         # Wrap the user query in a types.Content message
         content = types.Content(
@@ -251,98 +262,194 @@ class OrchestratorTaskManager(InMemoryTaskManager):
         """
         return request.params.message.parts[0].text
 
+    # async def on_send_task(self, request: SendTaskRequest) -> SendTaskResponse:
+    #     """
+    #     Called by the A2A server when a new task arrives:
+    #     1. Store the incoming user message
+    #     2. Invoke the OrchestratorAgent to get a response
+    #     3. Append response to history, mark completed
+    #     4. Return a SendTaskResponse with the full Task
+    #     """
+    #     print(f"OrchestratorTaskManager received task {request.params.id}")
+
+    #     # Step 1: save the initial message
+    #     task = await self.upsert_task(request.params)
+
+    #     # Step 2: run orchestration logic
+    #     user_text = self._get_user_text(request)
+    #     session_id  = request.params.sessionId
+
+    #     # the three-tired routing logic
+    #     target_agents = []
+    #     toggle_all = False
+    #     if request.params.metadata:
+    #         target_agents = request.params.metadata.get("target_agents", [])
+    #         toggle_all = request.params.metadata.get("toggle_all", False)
+
+    #     response_data = None 
+    #     # TIER 1: SINGLE AGENT SELECTED
+    #     if len(target_agents)==1:
+    #         selected_agent_name = target_agents[0]
+    #         print(f"[Orchestrator Logic] Tier 1: Answer from the selected agent: '{selected_agent_name}'")
+
+    #         response_data = await self.agent.delegate_task_directly(
+    #             agent_name=selected_agent_name,
+    #             user_text=user_text,
+    #             session_id=session_id
+    #         )
+
+    #     # TIER 2: MULTIPLE AGENTS SELECTED
+    #     elif len(target_agents)>1:
+
+    #         # CASE A: toggle_all is TRUE -> Get the SINGLE BEST answer
+    #         if toggle_all is True:
+    #             print(f"[Orchestrator Logic] Tier 2: Best Answer from multiple selected agents: {target_agents}")
+
+    #             agent_list_str = ", ".join(target_agents)
+    #             instruction = (f"You must choose the single best agent from the following list to answer the user's query: [{agent_list_str}]"
+    #                            "Do not choose any other agent."
+    #                            )
+    #             query_for_llm = instruction + f"User query:- '{user_text}"
+    #             response_data = await self.agent.invoke(query_for_llm, session_id)
+
+    #         # CASE B: toggle_all is FALSE -> Get answers from ALL agents
+    #         else:
+    #             print(f"[Orchestrator Logic] Tier 2: Answers from all selected agents: {target_agents}")
+    #             tasks = []
+    #             for agent_name in target_agents:
+    #                 task_coro = self.agent.delegate_task_directly(
+    #                     agent_name=agent_name,
+    #                     user_text=user_text,
+    #                     session_id=session_id
+    #                 )
+    #                 tasks.append(task_coro)
+                
+    #             results = await asyncio.gather(*tasks)
+                
+    #             aggregated_message = {}
+    #             for res in results:
+    #                 agent_name = res.get('agent_name', 'Unknown Agent')
+    #                 agent_message = res.get('agent_message', 'No response.')
+    #                 aggregated_message[agent_name]= agent_message
+
+    #             json_string_message = json.dumps(aggregated_message, indent=2)
+    #             response_data = {
+    #                 'agent_name': 'Multi-Agent Fan-Out',
+    #                 'agent_message': json_string_message
+    #             }
+
+    #     # TIER 3: NO AGENT IS SELECTED
+    #     else:
+    #         print("[Orchestrator Logic] Tier 3: Automatic Routing from all agents.")
+    #         response_data = await self.agent.invoke(user_text, session_id)
+
+
+    #     # Step 3: wrap the LLM output into a Message
+    #     reply = Message(role="agent", parts=[TextPart(
+    #         text=response_data['agent_message'])])
+        
+    #     print("Agent response in O-TASK_MANAGER:",reply)
+    #     async with self.lock:
+    #             task.status = TaskStatus(state=TaskState.COMPLETED)
+    #             task.agent_name = response_data['agent_name']
+    #             task.history.append(reply)
+
+        
+    #     # Step 4: return structured response
+    #     return SendTaskResponse(id=request.id, result=task)
+
     async def on_send_task(self, request: SendTaskRequest) -> SendTaskResponse:
-        """
-        Called by the A2A server when a new task arrives:
-        1. Store the incoming user message
-        2. Invoke the OrchestratorAgent to get a response
-        3. Append response to history, mark completed
-        4. Return a SendTaskResponse with the full Task
-        """
-        print(f"OrchestratorTaskManager received task {request.params.id}")
+            """
+            Called by the A2A server when a new task arrives:
+            1. Store the incoming user message
+            2. Invoke the OrchestratorAgent to get a response
+            3. Append response to history, mark completed
+            4. Return a SendTaskResponse with the full Task
+            """
+            logger.info(f"Host OrchestratorTaskManager received task {request.params.id}")
 
-        # Step 1: save the initial message
-        task = await self.upsert_task(request.params)
+            # Step 1: save the initial message
+            task = await self.upsert_task(request.params)
 
-        # Step 2: run orchestration logic
-        user_text = self._get_user_text(request)
-        session_id  = request.params.sessionId
+            # Step 2: run orchestration logic
+            user_text = self._get_user_text(request)
+            session_id  = request.params.sessionId
+            metadata = request.params.metadata
+            # the three-tired routing logic
+            target_agents = []
+            toggle_all = False
+            if request.params.metadata:
+                target_agents = request.params.metadata.get("target_agents", [])
+                toggle_all = request.params.metadata.get("toggle_all", False)
 
-        # the three-tired routing logic
-        target_agents = []
-        toggle_all = False
-        if request.params.metadata:
-            target_agents = request.params.metadata.get("target_agents", [])
-            toggle_all = request.params.metadata.get("toggle_all", False)
+            response_data = None 
+            # TIER 1: SINGLE AGENT SELECTED
+            if len(target_agents)==1:
+                selected_agent_name = target_agents[0]
+                logger.info(f"[Host Orchestrator Logic] Tier 1: Answer from the selected agent: {selected_agent_name}")
 
-        response_data = None 
-        # TIER 1: SINGLE AGENT SELECTED
-        if len(target_agents)==1:
-            selected_agent_name = target_agents[0]
-            print(f"[Orchestrator Logic] Tier 1: Answer from the selected agent: '{selected_agent_name}'")
+                response_data = await self.agent.delegate_task_directly(
+                    agent_name=selected_agent_name,
+                    user_text=user_text,
+                    session_id=session_id
+                )
 
-            response_data = await self.agent.delegate_task_directly(
-                agent_name=selected_agent_name,
-                user_text=user_text,
-                session_id=session_id
-            )
+            # TIER 2: MULTIPLE AGENTS SELECTED
+            elif len(target_agents)>1:
 
-        # TIER 2: MULTIPLE AGENTS SELECTED
-        elif len(target_agents)>1:
+                # CASE A: toggle_all is False -> Get the SINGLE BEST answer
+                if toggle_all is False:
+                    logger.info(f"[Host Orchestrator Logic] Tier 2: Best Answer from multiple selected agents: {target_agents}")
 
-            # CASE A: toggle_all is TRUE -> Get the SINGLE BEST answer
-            if toggle_all is True:
-                print(f"[Orchestrator Logic] Tier 2: Best Answer from multiple selected agents: {target_agents}")
+                    agent_list_str = ", ".join(target_agents)
+                    instruction = (f"You must choose the single best agent from the following list to answer the user's query: [{agent_list_str}]"
+                                "Do not choose any other agent."
+                                )
+                    query_for_llm = instruction + f"User query:- '{user_text}"
+                    response_data = await self.agent.invoke(query_for_llm, session_id,metadata)
 
-                agent_list_str = ", ".join(target_agents)
-                instruction = (f"You must choose the single best agent from the following list to answer the user's query: [{agent_list_str}]"
-                               "Do not choose any other agent."
-                               )
-                query_for_llm = instruction + f"User query:- '{user_text}"
-                response_data = await self.agent.invoke(query_for_llm, session_id)
+                # CASE B: toggle_all is True -> Get answers from ALL agents
+                else:
+                    logger.info(f"[Host Orchestrator Logic] Tier 2: Answers from all selected agents: {target_agents}")
+                    tasks = []
+                    for agent_name in target_agents:
+                        task_coro = self.agent.delegate_task_directly(
+                            agent_name=agent_name,
+                            user_text=user_text,
+                            session_id=session_id
+                        )
+                        tasks.append(task_coro)
+                    
+                    results = await asyncio.gather(*tasks)
+                    
+                    aggregated_message = {}
+                    for res in results:
+                        agent_name = res.get('agent_name', 'Unknown Agent')
+                        agent_message = res.get('agent_message', 'No response.')
+                        aggregated_message[agent_name]= agent_message
 
-            # CASE B: toggle_all is FALSE -> Get answers from ALL agents
+                    json_string_message = json.dumps(aggregated_message, indent=2)
+                    response_data = {
+                        'agent_name': 'Multi-Agent Fan-Out',
+                        'agent_message': json_string_message
+                    }
+
+            # TIER 3: NO AGENT IS SELECTED
             else:
-                print(f"[Orchestrator Logic] Tier 2: Answers from all selected agents: {target_agents}")
-                tasks = []
-                for agent_name in target_agents:
-                    task_coro = self.agent.delegate_task_directly(
-                        agent_name=agent_name,
-                        user_text=user_text,
-                        session_id=session_id
-                    )
-                    tasks.append(task_coro)
-                
-                results = await asyncio.gather(*tasks)
-                
-                aggregated_message = {}
-                for res in results:
-                    agent_name = res.get('agent_name', 'Unknown Agent')
-                    agent_message = res.get('agent_message', 'No response.')
-                    aggregated_message[agent_name]= agent_message
-
-                json_string_message = json.dumps(aggregated_message, indent=2)
-                response_data = {
-                    'agent_name': 'Multi-Agent Fan-Out',
-                    'agent_message': json_string_message
-                }
-
-        # TIER 3: NO AGENT IS SELECTED
-        else:
-            print("[Orchestrator Logic] Tier 3: Automatic Routing from all agents.")
-            response_data = await self.agent.invoke(user_text, session_id)
+                logger.info("[Host Orchestrator Logic] Tier 3: Automatic Routing from all agents.")
+                response_data = await self.agent.invoke(user_text, session_id, metadata)
 
 
-        # Step 3: wrap the LLM output into a Message
-        reply = Message(role="agent", parts=[TextPart(
-            text=response_data['agent_message'])])
-        
-        print("Agent response in O-TASK_MANAGER:",reply)
-        async with self.lock:
-                task.status = TaskStatus(state=TaskState.COMPLETED)
-                task.agent_name = response_data['agent_name']
-                task.history.append(reply)
+            # Step 3: wrap the LLM output into a Message
+            reply = Message(role="agent", parts=[TextPart(
+                text=response_data['agent_message'])])
+            
+            logger.info(f"Agent response in O-TASK_MANAGER: {reply}")
+            async with self.lock:
+                    task.status = TaskStatus(state=TaskState.COMPLETED)
+                    task.agent_name = response_data['agent_name'] if response_data['agent_name'] else "OrchestratorAgent"
+                    task.history.append(reply)
 
-        
-        # Step 4: return structured response
-        return SendTaskResponse(id=request.id, result=task)
+            
+            # Step 4: return structured response
+            return SendTaskResponse(id=request.id, result=task)

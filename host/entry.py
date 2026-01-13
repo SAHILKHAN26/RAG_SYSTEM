@@ -1,5 +1,11 @@
 import asyncio                              # Built-in for running async coroutines
 import click                                # Library for building CLI interfaces
+import sys
+import os
+
+# Add project root to sys.path to allow imports from src and models
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 # Utility for discovering remote A2A agents from a local registry
 from src.utils.discovery import DiscoveryClient
 # Shared A2A server implementation (Starlette + JSON-RPC)
