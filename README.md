@@ -22,6 +22,42 @@ The system is split into two main scopes: **Global Chat (Orchestrator)** and **C
 -   **Behavior**: Manages users, uploads, and conversation history. Internally uses `RAGAgent` logic for responses.
 
 ---
+## 🧰 Used Technologies
+
+- **LangGraph** — Agents and workflows implemented with LangGraph (RAG and General agents).
+- **ADK** — Agent Development Kit used for building and composing agents.
+- **A2A** — Agent-to-Agent communication (Orchestrator routing between agents).
+
+> Note: The project also uses **FAISS** (vector store), **FastAPI** (REST API), **SQLite** for persistence, and Python 3.11+.
+
+---
+
+## ⚙️ Steps to use
+
+1. **Environment setup**
+
+   ```bash
+   # Create a virtual environment
+   python -m venv .venv
+
+   # Windows (PowerShell)
+   .\.venv\Scripts\Activate.ps1
+
+   # macOS / Linux
+   source .venv/bin/activate
+   ```
+
+2. **Install requirements**
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configure environment**
+
+   - Copy `.env example` to `.env` and update values (e.g., `DATABASE_URL`, `VECTOR_STORE_DIR`, `UPLOAD_DIR`).
+
+---
 
 ## 🚀 Startup Guide
 
@@ -48,7 +84,9 @@ python host/entry.py
 python main.py
 ```
 
----
+
+
+
 
 ## 🔌 API Endpoints (High Level)
 
