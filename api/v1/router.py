@@ -20,7 +20,8 @@ direct_agent_router = APIRouter()
 def build_orchestrator_payload(
     query: str,
     target_agents: Optional[List[str]] = None,
-    toggle_all: bool = False
+    toggle_all: bool = False,
+    conversation_id: str = None
 ) -> Dict:
 
     payload = {
@@ -32,7 +33,7 @@ def build_orchestrator_payload(
                 "role": "user",
                 "parts": [{"type": "text", "text": query}]
             },
-            "metadata": {"toggle_all": toggle_all}
+            "metadata": {"toggle_all": toggle_all, "conversation_id":conversation_id  }
         },
         "id": 1
     }
@@ -56,7 +57,8 @@ async def call_orchestrator(request: OrchestratorRequest):
     payload = build_orchestrator_payload(
         request.query,
         request.target_agents,
-        request.toggle_all
+        request.toggle_all,
+        request.conversation_id
     )
 
     logger.info("Sending request to orchestrator")

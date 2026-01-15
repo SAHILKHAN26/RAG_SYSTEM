@@ -135,17 +135,10 @@ class ConversationCreate(BaseModel):
     """Schema for creating a new conversation"""
     user_id: str = Field(..., description="User ID who owns the conversation")
     title: str = Field(..., min_length=1, max_length=255, description="Conversation title")
-    mode: ConversationMode = Field(default=ConversationMode.OPEN_CHAT, description="Conversation mode")
+    mode: ConversationMode = Field(default=ConversationMode.OPEN_CHAT, description="Conversation mode (per message)")
     first_message: str = Field(..., min_length=1, max_length=10000, description="First message in the conversation")
     document_ids: Optional[List[str]] = Field(default=None, description="Document IDs for RAG mode")
-    
-    @validator('document_ids')
-    def validate_document_ids_for_rag(cls, v, values):
-        """Validate that document_ids are provided for RAG mode"""
-        mode = values.get('mode')
-        if mode == ConversationMode.RAG and not v:
-            raise ValueError("document_ids are required for RAG mode conversations")
-        return v
+    conversation_id: str = Field(..., description="Conversation ID who owns the conversation")
 
 
 class ConversationUpdate(BaseModel):
@@ -158,7 +151,6 @@ class ConversationSummary(BaseModel):
     id: str
     user_id: str
     title: str
-    mode: ConversationMode
     created_at: datetime
     updated_at: datetime
     total_tokens: int
@@ -173,7 +165,6 @@ class ConversationResponse(BaseModel):
     id: str
     user_id: str
     title: str
-    mode: ConversationMode
     created_at: datetime
     updated_at: datetime
     total_tokens: int
@@ -207,6 +198,21 @@ class AddMessageResponse(BaseModel):
     conversation_id: str
     user_message: MessageResponse
     assistant_message: MessageResponse
+    
+    class Config:
+        from_attributes = True
+
+
+class ConversationMessageResponse(BaseModel):
+    """Schema for conversation response with only last message"""
+    conversation_id: str
+    user_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    total_tokens: int
+    last_user_message: MessageResponse
+    last_assistant_message: MessageResponse
     
     class Config:
         from_attributes = True

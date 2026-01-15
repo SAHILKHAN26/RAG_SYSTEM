@@ -7,7 +7,7 @@ wt ^
 new-tab -d . --title "GENERAL Agent" cmd /k "call .venv\Scripts\activate && python -m src.agents.langgraph.general_agent" ^
 ; new-tab -d . --title "RAG Agent" cmd /k "call .venv\Scripts\activate && python -m src.agents.langgraph.rag_agent"
 
-timeout /t 20 >nul
+timeout /t 13 >nul
 
 REM ==========================
 REM Host Orchestrator

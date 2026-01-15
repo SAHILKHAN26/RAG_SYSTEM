@@ -18,6 +18,7 @@ from src.core.constant import (
     MAX_HISTORY_TOKENS,
     MAX_CONTEXT_TOKENS,
     SLIDING_WINDOW_SIZE,
+    CONVERSATION_HISTORY_LIMIT,
 )
 from src.core.services.llm_service import LLMService, create_user_message, create_assistant_message
 from src.core.logger import app_logger as logger
@@ -108,6 +109,51 @@ class ConversationManager:
         except Exception as e:
             logger.error(f"Error getting message count: {e}", exc_info=True)
             return 0
+    
+    async def load_last_n_messages(
+        self,
+        session: AsyncSession,
+        conversation_id: str,
+        n: int = 5,
+    ) -> List[Message]:
+        """
+        Load the last N messages from a conversation.
+        
+        Args:
+            session: Database session
+            conversation_id: ID of the conversation
+            n: Number of recent messages to fetch (default: 5)
+            
+        Returns:
+            List of last N Message objects ordered by sequence number (oldest to newest)
+        """
+        try:
+            # Skip loading for temporary conversation IDs
+            if conversation_id.startswith("temp-"):
+                logger.info(f"Skipping history load for temporary conversation: {conversation_id}")
+                return []
+            
+            # Query to get last N messages ordered by sequence_number descending, then reverse
+            query = (
+                select(Message)
+                .where(Message.conversation_id == conversation_id)
+                .order_by(Message.sequence_number.desc())
+                .limit(n)
+            )
+            
+            result = await session.execute(query)
+            messages = result.scalars().all()
+            
+            # Reverse to get chronological order (oldest to newest)
+            messages_list = list(reversed(list(messages)))
+            
+            logger.info(f"Loaded last {len(messages_list)} messages for conversation {conversation_id}")
+            logger.info(f"messages are: {[msg.content for msg in messages_list]}")
+            return messages_list
+        
+        except Exception as e:
+            logger.error(f"Error loading last N messages: {e}", exc_info=True)
+            return []
     
     def messages_to_langchain(self, messages: List[Message]) -> List[BaseMessage]:
         """
@@ -260,11 +306,17 @@ class ConversationManager:
         Returns:
             Tuple of (messages, total_tokens)
         """
-        # Load conversation history
-        db_messages = await self.load_conversation_history(session, conversation_id)
+        logger.info(f"[ConversationManager] Preparing context for conversation {conversation_id}")
+        logger.debug(f"[ConversationManager] New message length: {len(new_message)} chars")
+        logger.debug(f"[ConversationManager] Retrieved context chunks: {len(retrieved_context) if retrieved_context else 0}")
+        
+        # Load last N messages from conversation history (using configurable limit)
+        db_messages = await self.load_last_n_messages(session, conversation_id, n=CONVERSATION_HISTORY_LIMIT)
+        logger.info(f"[ConversationManager] Retrieved {len(db_messages)} messages from database")
         
         # Convert to LangChain format
         history_messages = self.messages_to_langchain(db_messages)
+        logger.debug(f"[ConversationManager] Converted {len(history_messages)} messages to LangChain format")
         
         # Optimize history to fit token budget
         # Reserve tokens for RAG context and new message
@@ -272,16 +324,20 @@ class ConversationManager:
         if retrieved_context:
             rag_text = "\n\n".join(retrieved_context)
             rag_context_tokens = self.llm_service.count_tokens(rag_text) if self.llm_service else len(rag_text) // 4
+            logger.debug(f"[ConversationManager] RAG context tokens: {rag_context_tokens}")
         
         new_message_tokens = self.llm_service.count_tokens(new_message) if self.llm_service else len(new_message) // 4
+        logger.debug(f"[ConversationManager] New message tokens: {new_message_tokens}")
         
         # Calculate available tokens for history
         available_for_history = MAX_CONTEXT_TOKENS - rag_context_tokens - new_message_tokens - 500  # 500 buffer
+        logger.debug(f"[ConversationManager] Available tokens for history: {available_for_history}")
         
         optimized_history = self.optimize_context(
             history_messages,
             max_tokens=max(available_for_history, 1000)  # At least 1000 tokens for history
         )
+        logger.info(f"[ConversationManager] Optimized history: {len(history_messages)} -> {len(optimized_history)} messages")
         
         # Build final message list
         final_messages = []
@@ -304,17 +360,21 @@ Instructions:
 - Be specific and cite relevant parts of the context
 """
             final_messages.append(SystemMessage(content=system_prompt))
+            logger.debug(f"[ConversationManager] Added RAG system message with {len(retrieved_context)} context chunks")
         
         # Add optimized history
         final_messages.extend(optimized_history)
+        logger.debug(f"[ConversationManager] Added {len(optimized_history)} history messages")
         
         # Add new user message
         final_messages.append(HumanMessage(content=new_message))
+        logger.debug(f"[ConversationManager] Added new user message")
         
         # Calculate total tokens
         total_tokens = self.llm_service.count_message_tokens(final_messages) if self.llm_service else 0
         
-        logger.info(f"Prepared context: {len(final_messages)} messages, ~{total_tokens} tokens")
+        logger.info(f"[ConversationManager] Context prepared: {len(final_messages)} total messages, ~{total_tokens} tokens")
+        logger.debug(f"[ConversationManager] Breakdown - System: {1 if retrieved_context else 0}, History: {len(optimized_history)}, New: 1")
         
         return final_messages, total_tokens
 

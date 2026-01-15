@@ -153,7 +153,7 @@ class GeneralAgent:
             import uuid
             
             # Use ephemeral conversation ID
-            conversation_id = f"temp-general-{uuid.uuid4()}"
+            conversation_id = conversation_id
             
             # Create a temporary session context
             async with db_manager.async_session_maker() as temp_session:
@@ -179,16 +179,21 @@ class GeneralAgent:
         user_message: str,
     ) -> tuple[str, int]:
         """Internal processing logic"""
-        logger.info(f"Processing message for conversation {conversation_id}")
+        logger.info(f"[General Agent] Processing message for conversation {conversation_id}")
+        logger.debug(f"[General Agent] User message: {user_message[:100]}...")
         
         try:
             # Load conversation history
-            messages, _ = await self.conversation_manager.prepare_context(
+            logger.info(f"[General Agent] Loading conversation history for {conversation_id}")
+            messages, total_tokens = await self.conversation_manager.prepare_context(
                 session=session,
                 conversation_id=conversation_id,
                 new_message=user_message,
                 retrieved_context=None,
             )
+            
+            history_count = len(messages) - 1  # Exclude the new message
+            logger.info(f"[General Agent] Loaded {history_count} history messages, total context tokens: {total_tokens}")
             
             # Initialize state
             initial_state: GeneralState = {
@@ -200,23 +205,28 @@ class GeneralAgent:
                 "error": None,
             }
             
+            logger.debug(f"[General Agent] Initialized state with {len(initial_state['chat_history'])} history messages")
+            
             # Compile and run the graph
             compiled_graph = self.graph.compile()
             
             # Run the workflow
+            logger.info(f"[General Agent] Starting workflow execution")
             final_state = await compiled_graph.ainvoke(initial_state)
             
             response = final_state["generated_response"]
-            logger.info(f"Final response from GENERAL Agent: {response}")
+            logger.info(f"[General Agent] Generated response ({len(response)} chars)")
+            logger.debug(f"[General Agent] Response preview: {response[:200]}...")
             token_count = final_state["total_tokens"]
+            logger.info(f"[General Agent] Total tokens used: {token_count}")
             
             if final_state.get("error"):
-                logger.warning(f"Workflow completed with error: {final_state['error']}")
+                logger.warning(f"[General Agent] Workflow completed with error: {final_state['error']}")
             
             return response, token_count
         
         except Exception as e:
-            logger.error(f"Error processing message: {e}", exc_info=True)
+            logger.error(f"[General Agent] Error processing message: {e}", exc_info=True)
             return "I apologize, but I encountered an error processing your message.", 0
 
 

@@ -43,6 +43,7 @@ from src.core.schemas import (
     ConversationResponse,
     ConversationSummary,
     ConversationListResponse,
+    ConversationMessageResponse,
     AddMessageRequest,
     AddMessageResponse,
     MessageResponse,
@@ -54,6 +55,7 @@ from src.core.schemas import (
 from src.core.services.vector_store import get_vector_store
 from src.core.services.document_processor import get_document_processor
 from src.agents.langgraph.rag_agent import get_rag_agent
+from src.agents.langgraph.general_agent import get_general_agent
 from src.core.constant import UPLOAD_DIR, MAX_FILE_SIZE, ALLOWED_FILE_TYPES
 from src.core.logger import app_logger as logger
 
@@ -133,13 +135,93 @@ async def get_user(
 # Conversation Endpoints
 # ============================================================================
 
-@conversation_router.post("/conversations", response_model=ConversationResponse, status_code=201)
+@conversation_router.post("/conversations", response_model=ConversationMessageResponse, status_code=201)
 async def create_conversation(
     conv_data: ConversationCreate,
     session: AsyncSession = Depends(get_db),
 ):
     """Create a new conversation with first message"""
     try:
+        # Check if conversation_id already exists
+        existing_conv_result = await session.execute(
+            select(Conversation).where(Conversation.id == conv_data.conversation_id)
+        )
+        existing_conversation = existing_conv_result.scalar_one_or_none()
+        
+        if existing_conversation:
+            logger.info(f"Conversation {conv_data.conversation_id} already exists, skipping creation")
+            
+            # Get next sequence number for the message
+            seq_result = await session.execute(
+                select(func.max(Message.sequence_number)).where(
+                    Message.conversation_id == conv_data.conversation_id
+                )
+            )
+            max_seq = seq_result.scalar() or -1
+            next_seq = max_seq + 1
+            
+            # Add user message to existing conversation
+            user_msg = Message(
+                conversation_id=conv_data.conversation_id,
+                role=MessageRole.USER,
+                content=conv_data.first_message,
+                sequence_number=next_seq,
+            )
+            session.add(user_msg)
+            await session.flush()
+            
+            # Generate response using appropriate agent based on mode from request
+            if conv_data.mode == ConversationMode.RAG.value:
+                agent = get_rag_agent()
+                response_text, token_count = await agent.process_message(
+                    session=session,
+                    conversation_id=conv_data.conversation_id,
+                    user_message=conv_data.first_message,
+                    document_ids=conv_data.document_ids,
+                )
+            else:  # OPEN_CHAT
+                agent = get_general_agent()
+                response_text, token_count = await agent.process_message(
+                    session=session,
+                    conversation_id=conv_data.conversation_id,
+                    user_message=conv_data.first_message,
+                )
+            
+            # Add assistant message
+            assistant_msg = Message(
+                conversation_id=conv_data.conversation_id,
+                role=MessageRole.ASSISTANT,
+                content=response_text,
+                token_count=token_count,
+                sequence_number=next_seq + 1,
+            )
+            session.add(assistant_msg)
+            
+            # Update conversation token count
+            existing_conversation.total_tokens += token_count
+            
+            await session.commit()
+            await session.refresh(user_msg)
+            await session.refresh(assistant_msg)
+            await session.refresh(existing_conversation)
+            
+            logger.info(f"Added message to existing conversation: {conv_data.conversation_id}")
+            
+            # Return only last messages
+            return ConversationMessageResponse(
+                conversation_id=existing_conversation.id,
+                user_id=existing_conversation.user_id,
+                title=existing_conversation.title,
+                created_at=existing_conversation.created_at,
+                updated_at=existing_conversation.updated_at,
+                total_tokens=existing_conversation.total_tokens,
+                last_user_message=user_msg,
+                last_assistant_message=assistant_msg,
+            )
+        
+        # Conversation doesn't exist, create new one
+        logger.info(f"Creating new conversation: {conv_data.conversation_id}")
+        
         # Verify user exists
         user_result = await session.execute(
             select(User).where(User.id == conv_data.user_id)
@@ -156,11 +238,11 @@ async def create_conversation(
                 if not doc_result.scalar_one_or_none():
                     raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
         
-        # Create conversation
+        # Create conversation (without mode field)
         conversation = Conversation(
+            id = conv_data.conversation_id,
             user_id=conv_data.user_id,
             title=conv_data.title,
-            mode=conv_data.mode,
         )
         
         session.add(conversation)
@@ -186,15 +268,22 @@ async def create_conversation(
         session.add(user_msg)
         await session.flush()
         
-        # Generate response using RAG agent
-        rag_agent = get_rag_agent()
-        response_text, token_count = await rag_agent.process_message(
-            session=session,
-            conversation_id=conversation.id,
-            user_message=conv_data.first_message,
-            mode=conv_data.mode.value,
-            document_ids=conv_data.document_ids,
-        )
+        # Generate response using appropriate agent based on mode from request
+        if conv_data.mode == ConversationMode.RAG.value:
+            agent = get_rag_agent()
+            response_text, token_count = await agent.process_message(
+                session=session,
+                conversation_id=conversation.id,
+                user_message=conv_data.first_message,
+                document_ids=conv_data.document_ids,
+            )
+        else:  # OPEN_CHAT
+            agent = get_general_agent()
+            response_text, token_count = await agent.process_message(
+                session=session,
+                conversation_id=conversation.id,
+                user_message=conv_data.first_message,
+            )
         
         # Add assistant message
         assistant_msg = Message(
@@ -210,19 +299,23 @@ async def create_conversation(
         conversation.total_tokens = token_count
         
         await session.commit()
-        
-        # Load full conversation with relationships
         await session.refresh(conversation)
-        result = await session.execute(
-            select(Conversation)
-            .options(selectinload(Conversation.messages))
-            .options(selectinload(Conversation.documents))
-            .where(Conversation.id == conversation.id)
-        )
-        full_conversation = result.scalar_one()
+        await session.refresh(user_msg)
+        await session.refresh(assistant_msg)
         
         logger.info(f"Created conversation: {conversation.id}")
-        return full_conversation
+        
+        # Return only last messages
+        return ConversationMessageResponse(
+            conversation_id=conversation.id,
+            user_id=conversation.user_id,
+            title=conversation.title,
+            created_at=conversation.created_at,
+            updated_at=conversation.updated_at,
+            total_tokens=conversation.total_tokens,
+            last_user_message=user_msg,
+            last_assistant_message=assistant_msg,
+        )
     
     except HTTPException:
         raise
@@ -232,7 +325,7 @@ async def create_conversation(
         raise HTTPException(status_code=500, detail="Failed to create conversation")
 
 
-@conversation_router.get("/conversations", response_model=ConversationListResponse)
+@conversation_router.get("/all-conversations", response_model=ConversationListResponse)
 async def list_conversations(
     user_id: Optional[str] = None,
     limit: int = 20,
@@ -270,7 +363,6 @@ async def list_conversations(
                 id=conv.id,
                 user_id=conv.user_id,
                 title=conv.title,
-                mode=conv.mode,
                 created_at=conv.created_at,
                 updated_at=conv.updated_at,
                 total_tokens=conv.total_tokens,
@@ -315,90 +407,6 @@ async def get_conversation(
     except Exception as e:
         logger.error(f"Error getting conversation: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to get conversation")
-
-
-@conversation_router.post("/conversations/{conversation_id}/messages", response_model=AddMessageResponse)
-async def add_message(
-    conversation_id: str,
-    content: str = Form(...),
-    session: AsyncSession = Depends(get_db),
-):
-    """Add a message to an existing conversation"""
-    try:
-        # Get conversation
-        result = await session.execute(
-            select(Conversation)
-            .options(selectinload(Conversation.documents))
-            .where(Conversation.id == conversation_id)
-        )
-        conversation = result.scalar_one_or_none()
-        
-        if not conversation:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        
-        # Get next sequence number
-        seq_result = await session.execute(
-            select(func.max(Message.sequence_number)).where(
-                Message.conversation_id == conversation_id
-            )
-        )
-        max_seq = seq_result.scalar() or -1
-        next_seq = max_seq + 1
-        
-        # Add user message
-        user_msg = Message(
-            conversation_id=conversation_id,
-            role=MessageRole.USER,
-            content=content,
-            sequence_number=next_seq,
-        )
-        session.add(user_msg)
-        await session.flush()
-        
-        # Generate response
-        rag_agent = get_rag_agent()
-        document_ids = [doc.id for doc in conversation.documents]
-        
-        response_text, token_count = await rag_agent.process_message(
-            session=session,
-            conversation_id=conversation_id,
-            user_message=content,
-            mode=conversation.mode.value,
-            document_ids=document_ids,
-        )
-        
-        # Add assistant message
-        assistant_msg = Message(
-            conversation_id=conversation_id,
-            role=MessageRole.ASSISTANT,
-            content=response_text,
-            token_count=token_count,
-            sequence_number=next_seq + 1,
-        )
-        session.add(assistant_msg)
-        
-        # Update conversation
-        conversation.total_tokens += token_count
-        conversation.updated_at = datetime.utcnow()
-        
-        await session.commit()
-        await session.refresh(user_msg)
-        await session.refresh(assistant_msg)
-        
-        logger.info(f"Added message to conversation: {conversation_id}")
-        
-        return AddMessageResponse(
-            conversation_id=conversation_id,
-            user_message=user_msg,
-            assistant_message=assistant_msg,
-        )
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error adding message: {e}", exc_info=True)
-        await session.rollback()
-        raise HTTPException(status_code=500, detail="Failed to add message")
 
 
 @conversation_router.delete("/conversations/{conversation_id}", status_code=204)

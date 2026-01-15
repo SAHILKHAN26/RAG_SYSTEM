@@ -54,10 +54,12 @@ def main(host: str = ORCHESTRATOR_HOST, port: int = ORCHESTRATOR_PORT, registry:
         ),
         tags=["routing", "orchestration"],       # Keywords to aid discovery
         examples=[                                  # Sample user queries
-            "tell me about the company x?",
-            "tell me about the company who recently gone through data breach?"
-            "what is sql injection ?"
-            "which company has most breaches in last 6 months?"
+            "give me details about project status",
+            "summarize the last meeting notes",
+            "who is shahrukh khan",
+            "give me details of apple from documents",
+            "give me details of sahil khan",
+            "tell me about tesla and spacex"
         ]
     )
     orchestrator_card = AgentCard(

@@ -149,7 +149,7 @@ class OrchestratorAgent:
         return list(self.connectors.keys())
 
 
-    async def delegate_task_directly(self, agent_name:  str, user_text: str, session_id: str)-> dict:
+    async def delegate_task_directly(self, agent_name:  str, user_text: str, session_id: str,conversation_id: str)-> dict:
         """Directly delegates a task to a specific agent without LLM routing."""
         
         print(f"Directly delegating to {agent_name}")
@@ -161,7 +161,7 @@ class OrchestratorAgent:
         connector = self.connectors[agent_name]
 
         # delegate task and get the result
-        child_task = await connector.send_task(user_text, session_id)
+        child_task = await connector.send_task(user_text, session_id,conversation_id)
         response_text = ""
         if child_task.history and len(child_task.history) >0:
             last_part = child_task.history[-1].parts[0]
@@ -196,8 +196,12 @@ class OrchestratorAgent:
             state["session_id"] = str(uuid.uuid4())
         session_id = state["session_id"]
 
+        # Get conversation_id from state if not provided (for tool calls via LLM)
+        if "metadata" in state:
+            conversation_id = state["metadata"].get("conversation_id")
+
         # Delegate task asynchronously and await Task result
-        child_task = await connector.send_task(message, session_id)
+        child_task = await connector.send_task(message, session_id,conversation_id)
 
         # Extract text from the last history entry if available
         if child_task.history and len(child_task.history) > 1:
@@ -262,102 +266,6 @@ class OrchestratorTaskManager(InMemoryTaskManager):
         """
         return request.params.message.parts[0].text
 
-    # async def on_send_task(self, request: SendTaskRequest) -> SendTaskResponse:
-    #     """
-    #     Called by the A2A server when a new task arrives:
-    #     1. Store the incoming user message
-    #     2. Invoke the OrchestratorAgent to get a response
-    #     3. Append response to history, mark completed
-    #     4. Return a SendTaskResponse with the full Task
-    #     """
-    #     print(f"OrchestratorTaskManager received task {request.params.id}")
-
-    #     # Step 1: save the initial message
-    #     task = await self.upsert_task(request.params)
-
-    #     # Step 2: run orchestration logic
-    #     user_text = self._get_user_text(request)
-    #     session_id  = request.params.sessionId
-
-    #     # the three-tired routing logic
-    #     target_agents = []
-    #     toggle_all = False
-    #     if request.params.metadata:
-    #         target_agents = request.params.metadata.get("target_agents", [])
-    #         toggle_all = request.params.metadata.get("toggle_all", False)
-
-    #     response_data = None 
-    #     # TIER 1: SINGLE AGENT SELECTED
-    #     if len(target_agents)==1:
-    #         selected_agent_name = target_agents[0]
-    #         print(f"[Orchestrator Logic] Tier 1: Answer from the selected agent: '{selected_agent_name}'")
-
-    #         response_data = await self.agent.delegate_task_directly(
-    #             agent_name=selected_agent_name,
-    #             user_text=user_text,
-    #             session_id=session_id
-    #         )
-
-    #     # TIER 2: MULTIPLE AGENTS SELECTED
-    #     elif len(target_agents)>1:
-
-    #         # CASE A: toggle_all is TRUE -> Get the SINGLE BEST answer
-    #         if toggle_all is True:
-    #             print(f"[Orchestrator Logic] Tier 2: Best Answer from multiple selected agents: {target_agents}")
-
-    #             agent_list_str = ", ".join(target_agents)
-    #             instruction = (f"You must choose the single best agent from the following list to answer the user's query: [{agent_list_str}]"
-    #                            "Do not choose any other agent."
-    #                            )
-    #             query_for_llm = instruction + f"User query:- '{user_text}"
-    #             response_data = await self.agent.invoke(query_for_llm, session_id)
-
-    #         # CASE B: toggle_all is FALSE -> Get answers from ALL agents
-    #         else:
-    #             print(f"[Orchestrator Logic] Tier 2: Answers from all selected agents: {target_agents}")
-    #             tasks = []
-    #             for agent_name in target_agents:
-    #                 task_coro = self.agent.delegate_task_directly(
-    #                     agent_name=agent_name,
-    #                     user_text=user_text,
-    #                     session_id=session_id
-    #                 )
-    #                 tasks.append(task_coro)
-                
-    #             results = await asyncio.gather(*tasks)
-                
-    #             aggregated_message = {}
-    #             for res in results:
-    #                 agent_name = res.get('agent_name', 'Unknown Agent')
-    #                 agent_message = res.get('agent_message', 'No response.')
-    #                 aggregated_message[agent_name]= agent_message
-
-    #             json_string_message = json.dumps(aggregated_message, indent=2)
-    #             response_data = {
-    #                 'agent_name': 'Multi-Agent Fan-Out',
-    #                 'agent_message': json_string_message
-    #             }
-
-    #     # TIER 3: NO AGENT IS SELECTED
-    #     else:
-    #         print("[Orchestrator Logic] Tier 3: Automatic Routing from all agents.")
-    #         response_data = await self.agent.invoke(user_text, session_id)
-
-
-    #     # Step 3: wrap the LLM output into a Message
-    #     reply = Message(role="agent", parts=[TextPart(
-    #         text=response_data['agent_message'])])
-        
-    #     print("Agent response in O-TASK_MANAGER:",reply)
-    #     async with self.lock:
-    #             task.status = TaskStatus(state=TaskState.COMPLETED)
-    #             task.agent_name = response_data['agent_name']
-    #             task.history.append(reply)
-
-        
-    #     # Step 4: return structured response
-    #     return SendTaskResponse(id=request.id, result=task)
-
     async def on_send_task(self, request: SendTaskRequest) -> SendTaskResponse:
             """
             Called by the A2A server when a new task arrives:
@@ -375,6 +283,8 @@ class OrchestratorTaskManager(InMemoryTaskManager):
             user_text = self._get_user_text(request)
             session_id  = request.params.sessionId
             metadata = request.params.metadata
+            conversation_id = metadata.get("conversation_id") if metadata else None
+            
             # the three-tired routing logic
             target_agents = []
             toggle_all = False
@@ -391,7 +301,8 @@ class OrchestratorTaskManager(InMemoryTaskManager):
                 response_data = await self.agent.delegate_task_directly(
                     agent_name=selected_agent_name,
                     user_text=user_text,
-                    session_id=session_id
+                    session_id=session_id,
+                    conversation_id=conversation_id
                 )
 
             # TIER 2: MULTIPLE AGENTS SELECTED
@@ -416,7 +327,8 @@ class OrchestratorTaskManager(InMemoryTaskManager):
                         task_coro = self.agent.delegate_task_directly(
                             agent_name=agent_name,
                             user_text=user_text,
-                            session_id=session_id
+                            session_id=session_id,
+                            conversation_id=conversation_id
                         )
                         tasks.append(task_coro)
                     

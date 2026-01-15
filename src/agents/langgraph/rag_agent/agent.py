@@ -34,7 +34,6 @@ class RAGState(TypedDict):
     chat_history: Annotated[List[BaseMessage], add]
     retrieved_context: Optional[List[str]]
     generated_response: str
-    mode: str  # 'open_chat' or 'rag'
     document_ids: List[str]
     total_tokens: int
     error: Optional[str]
@@ -47,8 +46,7 @@ class RAGState(TypedDict):
 class RAGAgent:
     """LangGraph-based RAG agent for conversational AI"""
     
-    # Heuristic threshold for L2 distance (adjust based on embedding model)
-    # Lower is better. If best match is > threshold, we assume it's irrelevant.
+
     RELEVANCE_THRESHOLD = 1.2
     
     def __init__(
@@ -79,24 +77,12 @@ class RAGAgent:
         # Create the graph
         workflow = StateGraph(RAGState)
         
-        # Add nodes
-        workflow.add_node("router", self._router_node)
         workflow.add_node("retrieve", self._retrieval_node)
         workflow.add_node("generate", self._generation_node)
         
         # Add edges
-        workflow.set_entry_point("router")
-        
-        # Router decides: retrieve or generate directly
-        workflow.add_conditional_edges(
-            "router",
-            self._should_retrieve,
-            {
-                "retrieve": "retrieve",
-                "generate": "generate",
-            }
-        )
-        
+        workflow.set_entry_point("retrieve")
+
         # After retrieval, go to generation
         workflow.add_edge("retrieve", "generate")
         
@@ -105,45 +91,7 @@ class RAGAgent:
         
         return workflow
     
-    async def _router_node(self, state: RAGState) -> RAGState:
-        """
-        Router node: Determines if retrieval is needed.
-        
-        Args:
-            state: Current state
-            
-        Returns:
-            Updated state
-        """
-        logger.info(f"Router node: mode={state.get('mode')}")
-        return state
-    
-    def _should_retrieve(self, state: RAGState) -> str:
-        """
-        Conditional edge: Decide if retrieval is needed.
-        
-        Args:
-            state: Current state
-            
-        Returns:
-            Next node name
-        """
-        mode = state.get("mode")
-        doc_ids = state.get("document_ids")
-        
-        # Case 1: Explicit RAG Mode -> Always retrieve
-        if mode == ConversationMode.RAG.value:
-            return "retrieve"
-            
-        # Case 2: Explicitly provided documents -> Always retrieve
-        if doc_ids and len(doc_ids) > 0:
-            return "retrieve"
-            
-        # Case 3: Orchestrator / Open Chat with NO docs -> "Auto RAG"
-        # We route to retrieval to search ALL chunks. 
-        # The retrieval node will decide if results are relevant enough to keep.
-        return "retrieve"
-    
+
     async def _retrieval_node(self, state: RAGState) -> RAGState:
         """
         Retrieval node: Fetch relevant chunks from vector store.
@@ -224,15 +172,14 @@ class RAGAgent:
                 ])
                 
                 system_prompt = f"""You are a helpful AI assistant. Answer the user's question based on the following context.
+                Context:
+                {context_text}
 
-Context:
-{context_text}
-
-Instructions:
-- Use ONLY the information from the provided context
-- If the context doesn't contain enough information, say so
-- Be specific and cite relevant parts of the context
-"""
+                Instructions:
+                - Use ONLY the information from the provided context
+                - If the context doesn't contain enough information, say so
+                - Be specific and cite relevant parts of the context
+                """
                 messages.append({"role": "system", "content": system_prompt})
             else:
                 # No context (Open Chat fallback)
@@ -284,7 +231,6 @@ Instructions:
         user_message: str,  # Simplified interface for TaskManager
         session: Optional[AsyncSession] = None,
         conversation_id: Optional[str] = None,
-        mode: str = ConversationMode.OPEN_CHAT.value,
         document_ids: Optional[List[str]] = None,
     ) -> Any:  # Returns dict for TaskManager or tuple for internal use
         """
@@ -300,14 +246,11 @@ Instructions:
             from src.core.database import db_manager
             import uuid
             
-            # Use ephemeral conversation ID
-            conversation_id = f"temp-{uuid.uuid4()}"
-            mode = ConversationMode.OPEN_CHAT.value # Default to open/auto for orchestrator
             
             # Create a temporary session context
             async with db_manager.async_session_maker() as temp_session:
                 response_text, _ = await self._process_internal(
-                    temp_session, conversation_id, user_message, mode, document_ids
+                    temp_session, conversation_id, user_message, document_ids
                 )
                 
                 # Format for TaskManager
@@ -318,7 +261,7 @@ Instructions:
         else:
             # Internal call with existing session validation
             return await self._process_internal(
-                session, conversation_id, user_message, mode, document_ids
+                session, conversation_id, user_message, document_ids
             )
 
     async def _process_internal(
@@ -326,21 +269,26 @@ Instructions:
         session: AsyncSession,
         conversation_id: str,
         user_message: str,
-        mode: str,
         document_ids: Optional[List[str]],
     ) -> tuple[str, int]:
         """Internal processing logic"""
-        logger.info(f"Processing message for conversation {conversation_id}")
+        logger.info(f"[RAG Agent] Processing message for conversation {conversation_id}")
+        logger.debug(f"[RAG Agent] User message: {user_message[:100]}...")
+        logger.debug(f"[RAG Agent] Document IDs: {document_ids}")
         
         try:
             # Load conversation history
             # Note: For orchestrator/temp calls, this might be empty, which is fine
-            messages, _ = await self.conversation_manager.prepare_context(
+            logger.info(f"[RAG Agent] Loading conversation history for {conversation_id}")
+            messages, total_tokens = await self.conversation_manager.prepare_context(
                 session=session,
                 conversation_id=conversation_id,
                 new_message=user_message,
                 retrieved_context=None,
             )
+            
+            history_count = len(messages) - 1  # Exclude the new message
+            logger.info(f"[RAG Agent] Loaded {history_count} history messages, total context tokens: {total_tokens}")
             
             # Initialize state
             initial_state: RAGState = {
@@ -349,29 +297,33 @@ Instructions:
                 "chat_history": messages[:-1],
                 "retrieved_context": None,
                 "generated_response": "",
-                "mode": mode,
                 "document_ids": document_ids or [],
                 "total_tokens": 0,
                 "error": None,
             }
             
+            logger.debug(f"[RAG Agent] Initialized state with {len(initial_state['chat_history'])} history messages")
+            
             # Compile and run the graph
             compiled_graph = self.graph.compile()
             
             # Run the workflow
+            logger.info(f"[RAG Agent] Starting workflow execution")
             final_state = await compiled_graph.ainvoke(initial_state)
             
             response = final_state["generated_response"]
-            logger.info(f"Final response from RAG Agent: {response}")
+            logger.info(f"[RAG Agent] Generated response ({len(response)} chars)")
+            logger.debug(f"[RAG Agent] Response preview: {response[:200]}...")
             token_count = final_state["total_tokens"]
+            logger.info(f"[RAG Agent] Total tokens used: {token_count}")
             
             if final_state.get("error"):
-                logger.warning(f"Workflow completed with error: {final_state['error']}")
+                logger.warning(f"[RAG Agent] Workflow completed with error: {final_state['error']}")
             
             return response, token_count
         
         except Exception as e:
-            logger.error(f"Error processing message: {e}", exc_info=True)
+            logger.error(f"[RAG Agent] Error processing message: {e}", exc_info=True)
             return "I apologize, but I encountered an error processing your message.", 0
 
 
