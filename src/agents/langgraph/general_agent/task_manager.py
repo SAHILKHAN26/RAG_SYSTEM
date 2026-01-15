@@ -4,7 +4,7 @@ from models.request import SendTaskRequest, SendTaskResponse
 from models.task import Message, Task, TextPart, TaskStatus, TaskState
 import json
 
-
+from src.core.logger import app_logger as logger
 class GeneralAgentTaskManager(InMemoryTaskManager):
     """
     Connects the GeneralAgent to the task handling system,
@@ -35,8 +35,12 @@ class GeneralAgentTaskManager(InMemoryTaskManager):
         # Extract the user's query
         query = self._get_user_query(request)
         
+        # Extract conversation_id if available
+        conversation_id = request.params.conversationId
+        logger.info(f"Conversation ID: {conversation_id}")
+        
         # Invoke agent
-        result = await self.agent.process_message(query)
+        result = await self.agent.process_message(query, conversation_id=conversation_id)
         
         result_text = result['agent_message']
         agent_name = result['agent_name']

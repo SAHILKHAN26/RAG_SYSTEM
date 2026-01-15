@@ -35,9 +35,12 @@ class RAGAgentTaskManager(InMemoryTaskManager):
         # Extract the user's query
         query = self._get_user_query(request)
         
+        # Extract conversation_id if available
+        conversation_id = request.params.conversationId
+        
         # Invoke agent (Auto RAG mode via Orchestrator)
         # The agent.process_message now handles creating a temp session and returning a dict
-        result = await self.agent.process_message(query)
+        result = await self.agent.process_message(query, conversation_id=conversation_id)
         
         result_text = result['agent_message']
         agent_name = result['agent_name']

@@ -100,7 +100,6 @@ class Conversation(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
-    mode: Mapped[ConversationMode] = mapped_column(Enum(ConversationMode), nullable=False, default=ConversationMode.OPEN_CHAT)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -125,7 +124,7 @@ class Conversation(Base):
     )
 
     def __repr__(self):
-        return f"<Conversation(id={self.id}, title={self.title}, mode={self.mode})>"
+        return f"<Conversation(id={self.id}, title={self.title})>"
 
 
 class Message(Base):

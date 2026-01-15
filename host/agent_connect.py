@@ -29,13 +29,14 @@ class AgentConnector:
         # Log that the connector is ready for use
         print(f"AgentConnector: initialized for {self.name} at {base_url}")
 
-    async def send_task(self, message: str, session_id: str) -> Task:
+    async def send_task(self, message: str, session_id: str, conversation_id: str = None) -> Task:
         """
         Send a text task to the remote agent and return its completed Task.
 
         Args:
             message (str): What you want the agent to do (e.g., "What time is it?").
             session_id (str): Session identifier to group related calls.
+            conversation_id (str): Optional conversation identifier.
 
         Returns:
             Task: The full Task object (including history) from the remote agent.
@@ -46,6 +47,7 @@ class AgentConnector:
         payload = {
             "id": task_id,
             "sessionId": session_id,
+            "conversationId": conversation_id,
             "message": {
                 "role": "user",                # Indicates this message is from the user
                 "parts": [                       # Wrap the text in a list of parts

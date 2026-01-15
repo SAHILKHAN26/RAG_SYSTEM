@@ -2,116 +2,151 @@
 
 ## 🏗️ Architecture
 
-The system is split into two main scopes: **Global Chat (Orchestrator)** and **Conversation APIs (Persistent Chat)**.
+The system is split into two main scopes: **Global Chat (By Agentic AI System)** and **Conversation APIs (Persistent Chat)**.
 
-### 1. Global Chat (Orchestrator) 🌐
-**Scope**: Stateless, routing-based interaction. The Orchestrator decides which agent handles your query.
--   **URL**: `http://localhost:8001`
--   **Method**: `POST /` (JSON-RPC)
--   **Behavior**: Analyzes request -> Routes to `GeneralAgent` or `RAGAgent` -> Returns response.
--   **Use Case**: "One-stop shop" for any query.
+### 1. Global Chat (By Agentic AI System) 🌐
+The central "brain" that routes your query without picking documents to the best-suited agent.
+-   **Internal URL**: `http://localhost:8001` (JSON-RPC)
+-   **Router Logic**: Analyzes request -> Routes to `GeneralAgent` (Open Chat) or `RAGAgent` (Document Q&A).
+-   **Public Endpoint**: `POST /orchestrator/global-chat` (via Main API).
 
 **Agents:**
 *   **GeneralAgent** (Port `10003`): Handles open chat, greetings, asking for advice.
 *   **RAGAgent** (Port `10002`): Handles questions about uploaded documents (Auto RAG).
 
 ### 2. Conversation APIs (REST) 💾
-**Scope**: Stateful, persistent chat history stored in `bot_gpt.db`.
+The user-facing gateway that manages state, persistence, and external access.
 -   **URL**: `http://localhost:8000`
 -   **Swagger UI**: `http://localhost:8000/docs`
--   **Behavior**: Manages users, uploads, and conversation history. Internally uses `RAGAgent` logic for responses.
-
----
-## 🧰 Used Technologies
-
-- **LangGraph** — Agents and workflows implemented with LangGraph (RAG and General agents).
-- **ADK** — Agent Development Kit used for building and composing agents.
-- **A2A** — Agent-to-Agent communication (Orchestrator routing between agents).
-
-> Note: The project also uses **FAISS** (vector store), **FastAPI** (REST API), **SQLite** for persistence, and Python 3.11+.
+-   **Key Features**:
+    -   **Persistent Global Chat**: Stores history of orchestrator interactions.
+    -   **Conversation Management**: Manages chat sessions, users, and uploads.
+    -   **Data Persistence**: Uses `bot_gpt.db` (SQLite) to store all messages and conversations.
 
 ---
 
-## ⚙️ Steps to use
+## � Context Relevance Power (Memory)
+
+One of the most powerful features of this system is **Stateful Context Awareness**.
+
+**How it works:**
+Whenever you provide a `conversation_id` in your request (whether it's Global Chat or a specific Conversation endpoint), the system automatically:
+1.  **Retrieves History:** Fetches the previous messages from the `messages` database table for that specific ID.
+2.  **injects Context:** Feeds this history back into the LLM along with your new query.
+3.  **Maintains Continuity:** This allows the AI to "remember" what you said earlier.
+
+> **Example:**
+> 1. User: "My name is Sahil." (ID: `chat-1`)
+> 2. User: "What is my name?" (ID: `chat-1`) -> **AI Answer:** "Your name is Sahil."
+>
+> *This works seamlessly across Global Chat, RAG, and Open Chat modes!*
+
+---
+
+## �🧰 Tech Stack
+
+*   **Backend Framework**: [FastAPI](https://fastapi.tiangolo.com/) (Async Python Framework)
+*   **Agentic Framework**: [LangGraph](https://langchain-ai.github.io/langgraph/) (Stateful multi-agent orchestration)
+*   **Agent Development**: Google's ADK & A2A (Agent-to-Agent Protocol)
+*   **Database**: SQLite (via `aiosqlite`) + SQLAlchemy (Async ORM)
+*   **Vector Querying**: FAISS (for RAG document indexing)
+*   **Language**: Python 3.11+
+
+---
+
+## ⚙️ Setup & Run
 
 1. **Environment setup**
-
    ```bash
-   # Create a virtual environment
    python -m venv .venv
-
-   # Windows (PowerShell)
-   .\.venv\Scripts\Activate.ps1
-
-   # macOS / Linux
-   source .venv/bin/activate
+   .\.venv\Scripts\Activate.ps1  # Windows
+   # source .venv/bin/activate   # Mac/Linux
    ```
 
 2. **Install requirements**
-
    ```bash
    pip install -r requirements.txt
    ```
 
 3. **Configure environment**
+   - Copy `.env example` to `.env` and fill in values (DB URL, Vector Store path, etc.).
 
-   - Copy `.env example` to `.env` and update values (e.g., `DATABASE_URL`, `VECTOR_STORE_DIR`, `UPLOAD_DIR`).
+4. **🚀 Launch System**
+   Simply run the start script. This will **initialize the database** first, then launch all services.
+   ```bash
+   run.bat
+   ```
 
 ---
 
-## 🚀 Startup Guide
+## 🔌 API Endpoints Guide
 
-Run these commands in separate terminals:
+### 1. Global Chat (Persistent) 🌐
+**Endpoint:** `POST /orchestrator/global-chat`
+**Use Case:** The main entry point for users. The system intelligently decides whether to chat casually or search documents.
 
-### Step 1: Start Microservices (Agents)
-```bash
-# Terminal 1: RAG Agent (Port 10002)
-python -m src.agents.langgraph.rag_agent
-
-# Terminal 2: General Agent (Port 10003)
-python -m src.agents.langgraph.general_agent
+**Request Body:**
+```json
+{
+  "user_id": "string",
+  "query": "string",
+  "target_agents": [
+    "RAGAgent", "GeneralAgent"
+  ],
+  "toggle_all": false, //true or false
+  "conversation_id": "string"
+}
 ```
 
-### Step 2: Start Global Chat (Orchestrator)
-```bash
-# Terminal 3: Orchestrator (Port 8001)
-python host/entry.py
+### 2. Conversation Management 💬
+**Endpoint:** `POST /api/v1/conversations`
+**Use Case:** A conversation with a specific mode or documents. Here you can select mode and the select documents in which you want to chat .
+
+**Request Body:**
+```json
+{
+  "user_id": "user_123",
+  "title": "My Research Chat",
+  "mode": "rag",                     // or "open_chat"
+  "first_message": "string",
+  "document_ids": ["doc_1", "doc_2"], // Optional: Attach specific docs
+  "conversation_id": "string"
+}
 ```
 
-### Step 3: Start REST APIs (Main Server)
-```bash
-# Terminal 4: Main API (Port 8000)
-python main.py
+**Get History:**
+`GET /api/v1/conversations/{conversation_id}`
+
+**Get All History of User:**
+`GET /api/v1/all-conversations`
+
+**Delete History:**
+`DELETE /api/v1/conversations/{conversation_id}`
+
+### 3. Document Management 📄
+**Endpoint:** `POST /api/v1/documents/upload`
+**Use Case:** Upload files for the RAG agent to index and search.
+
+**Request Form Data:**
+-   `file`: (The file object, e.g., PDF/TXT)
+-   `user_id`: "user_123"
+
+**Get Documents of User:**
+`GET /api/v1/documents`
+
+**Delete Document:**
+`DELETE /api/v1/documents/{document_id}`
+
+### 4. User Management 👤
+**Endpoint:** `POST /api/v1/users`
+**Use Case:** Register new users.
+
+**Request Body:**
+```json
+{
+  "username": "sahilkhan",
+  "email": "sahil@example.com"
+}
 ```
-
-
-
-
-
-## 🔌 API Endpoints (High Level)
-
-### Global Chat (Orchestrator)
--   **`POST /`**: Send a task/query to the intelligent router.
-    ```json
-    {
-      "method": "tasks/send",
-      "params": {
-        "id": "1",
-        "sessionId": "session-123",
-        "message": { "role": "user", "parts": [{ "text": "Hello" }] }
-      }
-    }
-    ```
-
-### Conversation REST APIs (`http://localhost:8000`)
-**Conversation Management**
--   `POST /api/v1/conversations`: Create a new chat session.
--   `POST /api/v1/conversations/{id}/messages`: Send a message to an existing chat.
--   `GET /api/v1/conversations/{id}`: Get full chat history.
-
-**Document Management**
--   `POST /api/v1/documents/upload`: Upload files (PDF, TXT, etc.) for RAG.
--   `GET /api/v1/documents`: List uploaded files.
-
-**Users**
--   `POST /api/v1/users`: Create a new user.
+**Get User details:**
+`GET /api/v1/users/{user_id}`

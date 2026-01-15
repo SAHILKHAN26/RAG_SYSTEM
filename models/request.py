@@ -60,9 +60,11 @@ class GetTaskResponse(JSONRPCResponse):
 
 
 class OrchestratorRequest(BaseModel):
+    user_id: str
     query: str
     target_agents: Optional[List[str]] = None
     toggle_all : bool =False
+    conversation_id: Optional[str] = None
 
 class DirectCallRequest(BaseModel):
     query: str = Field(..., min_length=1)
