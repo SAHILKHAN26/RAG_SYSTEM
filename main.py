@@ -28,7 +28,6 @@ app.add_middleware(
 # Include API router
 app.include_router(orchestrator_router, prefix="/orchestrator", tags=["orchestrator"])
 app.include_router(agent_list_router, prefix="/a2a", tags =["agent_list"])
-app.include_router(direct_agent_router, prefix="/direct", tags=["Direct Agent Call"])
 
 # Include new conversation API routers
 app.include_router(conversation_router, prefix="/api/v1", tags=["Conversations"])

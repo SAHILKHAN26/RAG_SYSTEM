@@ -103,7 +103,7 @@ class OrchestratorAgent:
         - Available tool functions
         """
         return LlmAgent(
-            model="gemini-2.0-flash",    # Specify Gemini model version
+            model="gemini-2.5-flash",    # Specify Gemini model version
             name="orchestrator_agent",          # Human identifier for this agent
             description="Delegates user queries to child A2A agents based on intent.",
             instruction=self._root_instruction,  # Function providing system prompt text
